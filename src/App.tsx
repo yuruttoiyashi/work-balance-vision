@@ -12,7 +12,6 @@ import type {
   FocusStatus,
   GeneratedAlert,
   MoodStatus,
-  Page,
   ProgressStatus,
 } from "./types";
 import {
@@ -22,8 +21,38 @@ import {
   parseCheckInCsv,
 } from "./utils/csv";
 
+type AppPage =
+  | "dashboard"
+  | "employee"
+  | "input"
+  | "import"
+  | "members"
+  | "alerts"
+  | "history";
+
 const STORAGE_KEY = "work-balance-vision-demo-checkins";
 const today = getLocalDateString();
+
+function addDays(dateString: string, days: number) {
+  const date = new Date(`${dateString}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return getLocalDateString(date);
+}
+
+function formatDisplayDate(dateString: string) {
+  const date = new Date(`${dateString}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) {
+    return dateString || "日付未選択";
+  }
+
+  return date.toLocaleDateString("ja-JP", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  });
+}
 
 const initialCheckInForms: CheckInForm[] = [
   {
@@ -98,7 +127,7 @@ const progressLabel: Record<ProgressStatus, string> = {
 };
 
 const sourceLabel: Record<CheckInSource, string> = {
-  manual: "手入力",
+  manual: "管理者入力",
   csv: "CSV取込",
   employee: "本人入力",
 };
@@ -130,6 +159,31 @@ function createInitialCheckIns(): CheckIn[] {
   return initialCheckInForms.map((form) => createCheckInFromForm(form, "manual"));
 }
 
+function normalizeSavedCheckIns(value: unknown): CheckIn[] {
+  if (!Array.isArray(value)) return createInitialCheckIns();
+
+  return value.map((item) => {
+    const raw = item as Partial<CheckIn>;
+    const now = new Date().toISOString();
+
+    return {
+      id: raw.id ?? createId(),
+      memberId: raw.memberId ?? members[0].id,
+      date: raw.date ?? today,
+      condition: raw.condition ?? "normal",
+      mood: raw.mood ?? "stable",
+      focus: raw.focus ?? "normal",
+      progress: raw.progress ?? "onTrack",
+      todayTask: raw.todayTask ?? "",
+      concern: raw.concern ?? "",
+      request: raw.request ?? "",
+      source: raw.source ?? "manual",
+      createdAt: raw.createdAt ?? now,
+      updatedAt: raw.updatedAt ?? raw.createdAt ?? now,
+    };
+  });
+}
+
 function loadCheckIns(): CheckIn[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -141,14 +195,10 @@ function loadCheckIns(): CheckIn[] {
     }
 
     const parsed = JSON.parse(saved);
+    const normalized = normalizeSavedCheckIns(parsed);
 
-    if (!Array.isArray(parsed)) {
-      const initial = createInitialCheckIns();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
-      return initial;
-    }
-
-    return parsed;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
   } catch {
     const initial = createInitialCheckIns();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
@@ -212,10 +262,11 @@ function getSortTime(item: CheckIn) {
   return new Date(item.updatedAt || item.createdAt).getTime();
 }
 
-function App() {
-  const [page, setPage] = useState<Page>("dashboard");
+export default function App() {
+  const [page, setPage] = useState<AppPage>("dashboard");
   const [checkIns, setCheckIns] = useState<CheckIn[]>(loadCheckIns);
   const [operationMessage, setOperationMessage] = useState("");
+  const [dashboardDate, setDashboardDate] = useState(today);
 
   const [csvFileName, setCsvFileName] = useState("");
   const [csvPreviewRows, setCsvPreviewRows] = useState<CsvPreviewRow[]>([]);
@@ -225,6 +276,18 @@ function App() {
   const [editForm, setEditForm] = useState<CheckInForm | null>(null);
 
   const [form, setForm] = useState<CheckInForm>({
+    memberId: members[0].id,
+    date: today,
+    condition: "normal",
+    mood: "stable",
+    focus: "normal",
+    progress: "onTrack",
+    todayTask: "",
+    concern: "",
+    request: "",
+  });
+
+  const [employeeForm, setEmployeeForm] = useState<CheckInForm>({
     memberId: members[0].id,
     date: today,
     condition: "normal",
@@ -246,12 +309,12 @@ function App() {
     );
   }, []);
 
-  const todayCheckIns = useMemo(() => {
-    return checkIns.filter((item) => item.date === today);
-  }, [checkIns]);
+  const selectedDateCheckIns = useMemo(() => {
+    return checkIns.filter((item) => item.date === dashboardDate);
+  }, [checkIns, dashboardDate]);
 
-  const latestTodayCheckIns = useMemo(() => {
-    const sorted = [...todayCheckIns].sort(
+  const latestSelectedDateCheckIns = useMemo(() => {
+    const sorted = [...selectedDateCheckIns].sort(
       (a, b) => getSortTime(b) - getSortTime(a)
     );
 
@@ -264,7 +327,7 @@ function App() {
     }, {});
 
     return Object.values(latestMap);
-  }, [todayCheckIns]);
+  }, [selectedDateCheckIns]);
 
   const latestByMember = useMemo(() => {
     const sorted = [...checkIns].sort((a, b) => getSortTime(b) - getSortTime(a));
@@ -278,8 +341,15 @@ function App() {
     }, {});
   }, [checkIns]);
 
+  const employeeHistory = useMemo(() => {
+    return checkIns
+      .filter((item) => item.memberId === employeeForm.memberId)
+      .sort((a, b) => getSortTime(b) - getSortTime(a))
+      .slice(0, 5);
+  }, [checkIns, employeeForm.memberId]);
+
   const supportNeeded = useMemo(() => {
-    return latestTodayCheckIns.filter((item) => {
+    return latestSelectedDateCheckIns.filter((item) => {
       return (
         item.condition === "bad" ||
         item.mood === "anxious" ||
@@ -291,12 +361,12 @@ function App() {
         item.request.trim() !== ""
       );
     });
-  }, [latestTodayCheckIns]);
+  }, [latestSelectedDateCheckIns]);
 
   const alerts = useMemo<GeneratedAlert[]>(() => {
     const result: GeneratedAlert[] = [];
 
-    latestTodayCheckIns.forEach((item) => {
+    latestSelectedDateCheckIns.forEach((item) => {
       const member = memberMap[item.memberId];
       if (!member) return;
 
@@ -307,7 +377,7 @@ function App() {
           memberName: member.name,
           title: "体調不良の申告があります",
           message:
-            "本日の最新入力で体調が「悪い」と入力されています。業務量や休憩の調整を検討してください。",
+            "選択日の最新入力で体調が「悪い」と入力されています。業務量や休憩の調整を検討してください。",
           severity: "high",
           date: item.date,
         });
@@ -320,7 +390,7 @@ function App() {
           memberName: member.name,
           title: "作業遅れの可能性があります",
           message:
-            "本日の最新入力で進捗が「遅れ」と入力されています。優先順位の整理や担当者フォローが必要です。",
+            "選択日の最新入力で進捗が「遅れ」と入力されています。優先順位の整理や担当者フォローが必要です。",
           severity: "middle",
           date: item.date,
         });
@@ -352,29 +422,35 @@ function App() {
     });
 
     members.forEach((member) => {
-      const hasTodayLatest = latestTodayCheckIns.some(
+      const hasSelectedDateLatest = latestSelectedDateCheckIns.some(
         (item) => item.memberId === member.id
       );
 
-      if (!hasTodayLatest) return;
+      if (!hasSelectedDateLatest) return;
 
-      const memberItems = checkIns
-        .filter((item) => item.memberId === member.id)
-        .sort((a, b) => getSortTime(b) - getSortTime(a));
+      const memberItemsUpToSelectedDate = checkIns
+        .filter((item) => item.memberId === member.id && item.date <= dashboardDate)
+        .sort((a, b) => {
+          if (a.date !== b.date) {
+            return b.date.localeCompare(a.date);
+          }
 
-      const latestTwo = memberItems.slice(0, 2);
+          return getSortTime(b) - getSortTime(a);
+        });
+
+      const latestTwo = memberItemsUpToSelectedDate.slice(0, 2);
 
       if (
         latestTwo.length >= 2 &&
         latestTwo.every((item) => item.condition === "bad")
       ) {
         result.push({
-          id: `continuous-bad-${member.id}`,
+          id: `continuous-bad-${member.id}-${dashboardDate}`,
           memberId: member.id,
           memberName: member.name,
           title: "体調不良が連続しています",
           message:
-            "直近2回の入力で体調不良が続いています。早めの面談や業務調整を検討してください。",
+            "選択日までの直近2回の入力で体調不良が続いています。早めの面談や業務調整を検討してください。",
           severity: "high",
           date: latestTwo[0].date,
         });
@@ -385,12 +461,12 @@ function App() {
         latestTwo.every((item) => item.focus === "low")
       ) {
         result.push({
-          id: `continuous-focus-${member.id}`,
+          id: `continuous-focus-${member.id}-${dashboardDate}`,
           memberId: member.id,
           memberName: member.name,
           title: "集中度の低下が続いています",
           message:
-            "直近2回の入力で集中度が低い状態です。作業環境やタスク量の見直しが必要かもしれません。",
+            "選択日までの直近2回の入力で集中度が低い状態です。作業環境やタスク量の見直しが必要かもしれません。",
           severity: "middle",
           date: latestTwo[0].date,
         });
@@ -398,18 +474,18 @@ function App() {
     });
 
     return result;
-  }, [checkIns, latestTodayCheckIns, memberMap]);
+  }, [checkIns, dashboardDate, latestSelectedDateCheckIns, memberMap]);
 
-  const badConditionCount = latestTodayCheckIns.filter(
+  const badConditionCount = latestSelectedDateCheckIns.filter(
     (item) => item.condition === "bad"
   ).length;
 
-  const delayCount = latestTodayCheckIns.filter(
+  const delayCount = latestSelectedDateCheckIns.filter(
     (item) => item.progress === "delay" || item.progress === "slightDelay"
   ).length;
 
   const checkInRate = Math.round(
-    (latestTodayCheckIns.length / members.length) * 100
+    (latestSelectedDateCheckIns.length / members.length) * 100
   );
 
   function saveCheckIns(next: CheckIn[]) {
@@ -424,6 +500,7 @@ function App() {
     const next = [newItem, ...checkIns];
 
     saveCheckIns(next);
+    setDashboardDate(form.date);
 
     setForm({
       memberId: form.memberId,
@@ -438,7 +515,36 @@ function App() {
     });
 
     setOperationMessage(
-      "デモ用データをこのブラウザのlocalStorageに登録しました。"
+      "管理者入力データをこのブラウザのlocalStorageに登録しました。"
+    );
+    setPage("dashboard");
+  }
+
+  function handleEmployeeSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const newItem = createCheckInFromForm(employeeForm, "employee");
+    const next = [newItem, ...checkIns];
+
+    saveCheckIns(next);
+    setDashboardDate(employeeForm.date);
+
+    const memberName = memberMap[employeeForm.memberId]?.name ?? "従業員";
+
+    setEmployeeForm({
+      memberId: employeeForm.memberId,
+      date: today,
+      condition: "normal",
+      mood: "stable",
+      focus: "normal",
+      progress: "onTrack",
+      todayTask: "",
+      concern: "",
+      request: "",
+    });
+
+    setOperationMessage(
+      `${memberName} さんの本人入力を登録しました。管理者ダッシュボードに反映されています。`
     );
     setPage("dashboard");
   }
@@ -453,6 +559,7 @@ function App() {
     const initial = createInitialCheckIns();
     saveCheckIns(initial);
 
+    setDashboardDate(today);
     setCsvFileName("");
     setCsvPreviewRows([]);
     setCsvErrors([]);
@@ -591,6 +698,11 @@ function App() {
     const next = [...importedCheckIns, ...checkIns];
     saveCheckIns(next);
 
+    const firstImportedDate = importedCheckIns[0]?.date;
+    if (firstImportedDate) {
+      setDashboardDate(firstImportedDate);
+    }
+
     setCsvPreviewRows([]);
     setCsvErrors([]);
     setCsvFileName("");
@@ -645,9 +757,11 @@ function App() {
     });
 
     saveCheckIns(next);
+    setDashboardDate(editForm.date);
     setEditingCheckInId(null);
     setEditForm(null);
     setOperationMessage("入力履歴をこのブラウザ内で更新しました。");
+    setPage("dashboard");
   }
 
   function deleteCheckIn(id: string) {
@@ -685,7 +799,7 @@ function App() {
               就労コンディション・業務支援ダッシュボード
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-              採用担当者がログインなしで操作できる公開デモ版です。入力・編集・削除・CSV取込は、このブラウザ内のlocalStorageに保存されます。
+              採用担当者がログインなしで操作できる公開デモ版です。従業員チェックインから入力すると、管理者ダッシュボードへ反映されます。
             </p>
           </div>
 
@@ -715,9 +829,14 @@ function App() {
               label="ダッシュボード"
             />
             <NavButton
+              active={page === "employee"}
+              onClick={() => setPage("employee")}
+              label="従業員チェックイン"
+            />
+            <NavButton
               active={page === "input"}
               onClick={() => setPage("input")}
-              label="コンディション入力"
+              label="管理者入力"
             />
             <NavButton
               active={page === "import"}
@@ -752,46 +871,107 @@ function App() {
 
           {page === "dashboard" && (
             <>
+              <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="text-sm font-bold text-blue-600">
+                      Dashboard Date
+                    </p>
+                    <h2 className="mt-1 text-xl font-bold text-slate-900">
+                      {formatDisplayDate(dashboardDate)} のダッシュボード
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-500">
+                      日付を切り替えて、過去のコンディションやアラートを確認できます。
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDashboardDate(addDays(dashboardDate, -1))}
+                      className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      前日
+                    </button>
+
+                    <input
+                      type="date"
+                      value={dashboardDate}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setDashboardDate(e.target.value);
+                        }
+                      }}
+                      className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => setDashboardDate(addDays(dashboardDate, 1))}
+                      className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      翌日
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setDashboardDate(today)}
+                      className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-700"
+                    >
+                      今日
+                    </button>
+                  </div>
+                </div>
+              </section>
+
               <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <KpiCard
-                  title="本日の入力率"
+                  title="選択日の入力率"
                   value={`${checkInRate}%`}
-                  description={`${latestTodayCheckIns.length} / ${members.length}名が入力済み`}
+                  description={`${latestSelectedDateCheckIns.length} / ${members.length}名が入力済み`}
                 />
                 <KpiCard
                   title="支援が必要な可能性"
                   value={`${supportNeeded.length}名`}
-                  description="本日の各メンバー最新入力から検知"
+                  description="選択日の各メンバー最新入力から検知"
                 />
                 <KpiCard
                   title="体調不良"
                   value={`${badConditionCount}名`}
-                  description="最新入力で体調「悪い」"
+                  description="選択日の最新入力で体調「悪い」"
                 />
                 <KpiCard
                   title="進捗遅れ"
                   value={`${delayCount}件`}
-                  description="最新入力でやや遅れ・遅れ"
+                  description="選択日の最新入力でやや遅れ・遅れ"
                 />
               </section>
 
               <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
                 <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                  <div className="mb-4 flex items-center justify-between">
+                  <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
                       <h2 className="text-lg font-bold text-slate-900">
-                        本日のコンディション
+                        選択日のコンディション
                       </h2>
                       <p className="text-sm text-slate-500">
-                        各メンバーの本日最新入力を一覧で確認できます。
+                        各メンバーの選択日最新入力を一覧で確認できます。
                       </p>
                     </div>
-                    <button
-                      onClick={() => setPage("input")}
-                      className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
-                    >
-                      入力する
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => setPage("employee")}
+                        className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
+                      >
+                        従業員として入力
+                      </button>
+                      <button
+                        onClick={() => setPage("input")}
+                        className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                      >
+                        管理者入力
+                      </button>
+                    </div>
                   </div>
 
                   <div className="overflow-hidden rounded-2xl border border-slate-200">
@@ -808,7 +988,7 @@ function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 bg-white">
-                        {latestTodayCheckIns.map((item) => {
+                        {latestSelectedDateCheckIns.map((item) => {
                           const member = memberMap[item.memberId];
 
                           return (
@@ -845,11 +1025,11 @@ function App() {
                           );
                         })}
 
-                        {latestTodayCheckIns.length === 0 && (
+                        {latestSelectedDateCheckIns.length === 0 && (
                           <tr>
                             <Td>
                               <span className="text-slate-400">
-                                本日の入力はまだありません
+                                選択日の入力はまだありません
                               </span>
                             </Td>
                             <Td />
@@ -870,7 +1050,7 @@ function App() {
                     優先フォロー
                   </h2>
                   <p className="mt-1 text-sm text-slate-500">
-                    本日の最新入力から、確認した方がよい内容を表示します。
+                    選択日の最新入力から、確認した方がよい内容を表示します。
                   </p>
 
                   <div className="mt-4 space-y-3">
@@ -893,7 +1073,7 @@ function App() {
 
                     {alerts.length === 0 && (
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-                        現在、優先フォローが必要なアラートはありません。
+                        選択日に優先フォローが必要なアラートはありません。
                       </div>
                     )}
                   </div>
@@ -902,13 +1082,116 @@ function App() {
             </>
           )}
 
+          {page === "employee" && (
+            <section className="grid gap-6 xl:grid-cols-[1fr_0.85fr]">
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                <p className="text-sm font-bold text-blue-600">
+                  Employee Check-in
+                </p>
+                <h2 className="mt-1 text-xl font-bold text-slate-900">
+                  従業員チェックイン
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  従業員本人が今日の体調・気分・集中度・業務進捗を入力する画面です。
+                  送信すると、管理者ダッシュボードに「本人入力」として反映されます。
+                </p>
+
+                <form onSubmit={handleEmployeeSubmit} className="mt-6 grid gap-5">
+                  <EmployeeFormFields
+                    form={employeeForm}
+                    setForm={setEmployeeForm}
+                  />
+
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPage("dashboard")}
+                      className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      ダッシュボードへ戻る
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-sm hover:bg-blue-500"
+                    >
+                      本人入力として送信
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <h3 className="text-lg font-bold text-slate-900">
+                    この画面の想定
+                  </h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-500">
+                    実運用では、従業員がログインして自分のチェックインだけを登録・確認する画面として利用します。
+                    公開デモでは、名前を選んで入力の流れを体験できます。
+                  </p>
+
+                  <div className="mt-4 grid gap-2 text-sm text-slate-600">
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      1. 従業員が自分の状態を入力
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      2. 管理者ダッシュボードに反映
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      3. 不調や支援依頼を自動アラート化
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <h3 className="text-lg font-bold text-slate-900">
+                    選択中メンバーの直近履歴
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    デモでは、選択したメンバーの直近5件を表示します。
+                  </p>
+
+                  <div className="mt-4 space-y-3">
+                    {employeeHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-bold text-slate-900">
+                            {item.date}
+                          </span>
+                          <Badge className={conditionClass(item.condition)}>
+                            {conditionLabel[item.condition]}
+                          </Badge>
+                          <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-600">
+                            {sourceLabel[item.source]}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-sm text-slate-600">
+                          {item.todayTask || "作業内容未入力"}
+                        </p>
+                      </div>
+                    ))}
+
+                    {employeeHistory.length === 0 && (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                        まだ履歴がありません。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           {page === "input" && (
             <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
               <h2 className="text-xl font-bold text-slate-900">
-                コンディション入力
+                管理者入力
               </h2>
               <p className="mt-1 text-sm text-slate-500">
-                公開デモ用として、このブラウザ内に入力内容を保存します。
+                管理者・支援者が代理入力する想定の画面です。
               </p>
 
               <form onSubmit={handleSubmit} className="mt-6 grid gap-5">
@@ -919,7 +1202,7 @@ function App() {
                     type="submit"
                     className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-sm hover:bg-blue-500"
                   >
-                    登録する
+                    管理者入力として登録
                   </button>
                 </div>
               </form>
@@ -1251,7 +1534,7 @@ function App() {
                         入力履歴の編集
                       </h2>
                       <p className="mt-1 text-sm text-slate-500">
-                        CSV取込データ・手入力データのどちらも、このブラウザ内で修正できます。
+                        CSV取込データ・手入力データ・本人入力データを、このブラウザ内で修正できます。
                       </p>
                     </div>
 
@@ -1556,6 +1839,142 @@ function ConditionFormFields({
   );
 }
 
+function EmployeeFormFields({
+  form,
+  setForm,
+}: {
+  form: CheckInForm;
+  setForm: (next: CheckInForm) => void;
+}) {
+  return (
+    <>
+      <div className="grid gap-5 md:grid-cols-2">
+        <Field label="あなたの名前">
+          <select
+            value={form.memberId}
+            onChange={(e) => setForm({ ...form, memberId: e.target.value })}
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            {members.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.name} / {member.role}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="日付">
+          <input
+            type="date"
+            value={form.date}
+            onChange={(e) => setForm({ ...form, date: e.target.value })}
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          />
+        </Field>
+
+        <Field label="今日の体調">
+          <select
+            value={form.condition}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                condition: e.target.value as ConditionStatus,
+              })
+            }
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            <option value="good">良い</option>
+            <option value="normal">普通</option>
+            <option value="bad">悪い</option>
+          </select>
+        </Field>
+
+        <Field label="今の気分">
+          <select
+            value={form.mood}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                mood: e.target.value as MoodStatus,
+              })
+            }
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            <option value="stable">安定</option>
+            <option value="anxious">不安</option>
+            <option value="irritated">イライラ</option>
+            <option value="down">落ち込み</option>
+          </select>
+        </Field>
+
+        <Field label="集中できそうか">
+          <select
+            value={form.focus}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                focus: e.target.value as FocusStatus,
+              })
+            }
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            <option value="high">高い</option>
+            <option value="normal">普通</option>
+            <option value="low">低い</option>
+          </select>
+        </Field>
+
+        <Field label="作業の進み具合">
+          <select
+            value={form.progress}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                progress: e.target.value as ProgressStatus,
+              })
+            }
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            <option value="onTrack">順調</option>
+            <option value="slightDelay">やや遅れ</option>
+            <option value="delay">遅れ</option>
+          </select>
+        </Field>
+      </div>
+
+      <Field label="今日やること・やったこと">
+        <textarea
+          value={form.todayTask}
+          onChange={(e) => setForm({ ...form, todayTask: e.target.value })}
+          rows={3}
+          placeholder="例：書類確認、データ入力、備品チェックなど"
+          className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+        />
+      </Field>
+
+      <Field label="困っていること・不安なこと">
+        <textarea
+          value={form.concern}
+          onChange={(e) => setForm({ ...form, concern: e.target.value })}
+          rows={3}
+          placeholder="例：作業量が多い、優先順位がわからない、体調が不安定など"
+          className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+        />
+      </Field>
+
+      <Field label="管理者に伝えたいこと・支援してほしいこと">
+        <textarea
+          value={form.request}
+          onChange={(e) => setForm({ ...form, request: e.target.value })}
+          rows={3}
+          placeholder="例：作業量を調整してほしい、確認の時間がほしい、休憩を入れたいなど"
+          className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+        />
+      </Field>
+    </>
+  );
+}
+
 function NavButton({
   active,
   label,
@@ -1646,5 +2065,3 @@ function Th({ children }: { children: ReactNode }) {
 function Td({ children }: { children?: ReactNode }) {
   return <td className="px-4 py-4 align-top text-slate-700">{children}</td>;
 }
-
-export default App;
